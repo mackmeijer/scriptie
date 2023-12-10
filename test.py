@@ -34,35 +34,50 @@ class InformedSender(nn.Module):
         self.temp = temp
 
         self.im_lin1 = nn.Linear(feat_size, embedding_size, bias=False)
-        self.im_conv2 = nn.Conv2d( 1, hidden_size,  kernel_size=(game_size, 1), stride=(game_size, 1), bias=False,)
-        self.im_conv3 = nn.Conv2d(1, 1, kernel_size=(hidden_size, 1), stride=(hidden_size, 1), bias=False)
-        self.im_lin4 = nn.Linear(embedding_size * 2, vocab_size, bias=False)
+        self.im_conv1 = nn.Conv2d(1, hidden_size, kernel_size=(game_size, 1), stride=(game_size, 1), bias=False)
+        self.im_conv2 = nn.Conv2d(1, 1, kernel_size=(hidden_size, 1), stride=(hidden_size, 1), bias=False)
+        self.im_lin2 = nn.Linear(embedding_size * 2, vocab_size, bias=False)
+
         self.gr_conv1 = GATConv(3, hidden_size, num_heads = head_size)
         self.gr_conv2 = GATConv(hidden_size, embedding_size, num_heads = head_size)
-        self.gr_lin1 = nn.Linear(hidden_size, 2)
+        self.gr_lin1 = nn.Linear(embedding_size*2, embedding_size)
 
-    def forward(self, x, g, feat, _aux_input=None):
-        emb = self.return_embeddings(x)
+    def forward(self, x, graphs,   _aux_input=None):
+        #embedding images 
+        emb = []
+        for i in range(self.game_size):
+            emb.append(self.return_embeddings(x[i]))
 
-        h = self.im_conv2(emb)
+        emb = torch.concat(emb, dim=2)
+        h = self.im_conv1(emb)
         h = torch.sigmoid(h)
         # in: h of size (batch_size, hidden_size, 1, embedding_size)
         # out: h of size (batch_size, 1, hidden_size, embedding_size)
         h = h.transpose(1, 2)
-        h = self.im_conv3(h)
+        h = self.im_conv2(h)
         # h of size (batch_size, 1, 1, embedding_size)
         h = torch.sigmoid(h)
         h = h.squeeze(dim=1)
         h = h.squeeze(dim=1)
         # h of size (batch_size, embedding_size)
-        res = self.gr_conv1(g, feat)
-        res= res.relu()
-        res = self.gr_conv2(g, res)
-        g.ndata['h'] = res
-        a = dgl.mean_nodes(g, 'h')
-        a = dgl.mean_nodes(g, 'h')
-        h = torch.cat((a[0][0][0], h[0]))
-        h = self.im_lin4(h)
+
+        #embedding graphs
+        gr_emb = []
+        for i in range(self.game_size):
+            g = graphs[i]
+            feat = graphs[i].ndata['object']
+            res = self.gr_conv1(g, feat)
+            res= res.relu()
+            res = self.gr_conv2(g, res)
+            g.ndata['h'] = res
+            a = dgl.mean_nodes(g, 'h')
+            a = dgl.mean_nodes(g, 'h')
+            gr_emb.append(a[0][0][0])
+
+        gr_emb = torch.concat(gr_emb, dim=0)
+        gr_emb = self.gr_lin1(gr_emb)
+        h = torch.cat((gr_emb, h[0]))
+        h = self.im_lin2(h)
         h = h.mul(1.0 / self.temp)
         # h of size (batch_size, vocab_size)
         logits = F.log_softmax(h, dim=0)
@@ -86,7 +101,6 @@ class InformedSender(nn.Module):
         
         # Concatenate the embeddings along the fourth dimension
         h = torch.cat(embs, dim=2)
-        print(h.size())
         return h
 
 class Receiver(nn.Module):
@@ -105,10 +119,18 @@ class Receiver(nn.Module):
         self.im_lin4 = nn.Linear(embedding_size * 2 + vocab_size, 2, bias=False)
         self.gr_conv1 = GATConv(3, hidden_size, num_heads = head_size)
         self.gr_conv2 = GATConv(hidden_size, embedding_size, num_heads = head_size)
-        self.gr_lin1 = nn.Linear(hidden_size, 2)
+        self.gr_lin1 = nn.Linear(embedding_size*2, embedding_size)
 
-    def forward(self, x, g, feat, vocab, _aux_input=None):
-        emb = self.return_embeddings(x)
+    def forward(self, x, graphs, vocab, _aux_input=None):
+        emb = []
+        #make sure graphs and images are given in random order
+        game_size_list = range(self.game_size)
+        order = sorted(game_size_list, key=lambda x: random.random())
+        for i in order:
+            emb.append(self.return_embeddings(x[i]))
+
+        emb = torch.concat(emb, dim=2)
+
         h = self.im_conv2(emb)
         h = torch.sigmoid(h)
         # in: h of size (batch_size, hidden_size, 1, embedding_size)
@@ -121,20 +143,27 @@ class Receiver(nn.Module):
         h = h.squeeze(dim=1)
         # h of size (batch_size, embedding_size)
 
-        res = self.gr_conv1(g, feat)
-        res= res.relu()
-        res = self.gr_conv2(g, res)
-        g.ndata['h'] = res
-        a = dgl.mean_nodes(g, 'h')
-        a = dgl.mean_nodes(g, 'h')
-        h = torch.cat((a[0][0][0], h[0]))
+        gr_emb = []
+        for i in order:
+            g = graphs[i]
+            feat = graphs[i].ndata['object']
+            res = self.gr_conv1(g, feat)
+            res= res.relu()
+            res = self.gr_conv2(g, res)
+            g.ndata['h'] = res
+            a = dgl.mean_nodes(g, 'h')
+            a = dgl.mean_nodes(g, 'h')
+            gr_emb.append(a[0][0][0])
+
+        gr_emb = torch.cat(gr_emb, dim=0)
+        gr_emb = self.gr_lin1(gr_emb)
+        h = torch.cat((gr_emb, h[0]))
         h = torch.cat((h, vocab))
         h = self.im_lin4(h)
         
         h = h.mul(1.0 / self.temp)
         # h of size (batch_size, vocab_size)
         logits = F.log_softmax(h, dim=0)
-        print(logits)
         return logits
 
     def return_embeddings(self, x):
@@ -155,7 +184,6 @@ class Receiver(nn.Module):
         
         # Concatenate the embeddings along the fourth dimension
         h = torch.cat(embs, dim=2)
-        print(h.size())
         return h
 
 def pic_gen():
@@ -230,11 +258,12 @@ def get_batch(batch_size):
 
     return images, graphs
 
-model = InformedSender(game_size = 1, feat_size = 160000, embedding_size = 30, hidden_size=80, head_size = 2)
+model = InformedSender(game_size = 2, feat_size = 160000, embedding_size = 30, hidden_size=80, head_size = 2)
 optimizer = torch.optim.Adam(model.parameters(), lr=0.01)
-images, graphs = pic_gen()
-pred = model(images, graphs, graphs.ndata['object'])
 
-model2 = Receiver(game_size = 1, feat_size = 160000, embedding_size = 30, hidden_size=80, head_size = 2)
-pred2 = model2(images, graphs, graphs.ndata['object'], pred)
+images, graphs = get_batch(2)
+pred = model(images, graphs)
+print(pred)
+model2 = Receiver(game_size = 2, feat_size = 160000, embedding_size = 30, hidden_size=80, head_size = 2)
+pred2 = model2(images, graphs, pred)
 print("pred", pred2)
