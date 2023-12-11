@@ -164,7 +164,7 @@ class Receiver(nn.Module):
         h = h.mul(1.0 / self.temp)
         # h of size (batch_size, vocab_size)
         logits = F.log_softmax(h, dim=0)
-        return logits
+        return logits, order.index(0)
 
     def return_embeddings(self, x):
         # Embed each image (left or right)
@@ -258,12 +258,52 @@ def get_batch(batch_size):
 
     return images, graphs
 
-model = InformedSender(game_size = 2, feat_size = 160000, embedding_size = 30, hidden_size=80, head_size = 2)
-optimizer = torch.optim.Adam(model.parameters(), lr=0.01)
 
-images, graphs = get_batch(2)
-pred = model(images, graphs)
-print(pred)
+
+model = InformedSender(game_size = 2, feat_size = 160000, embedding_size = 30, hidden_size=80, head_size = 2)
 model2 = Receiver(game_size = 2, feat_size = 160000, embedding_size = 30, hidden_size=80, head_size = 2)
-pred2 = model2(images, graphs, pred)
-print("pred", pred2)
+
+optimizer = torch.optim.Adam(model.parameters(), lr=0.01)
+optimizer2 = torch.optim.Adam(model2.parameters(), lr=0.01)
+
+acc_list = []
+
+for epoch in range(100):
+    print(epoch)
+    images, graphs = get_batch(2)
+
+    pred = model(images, graphs)
+    pred2, label = model2(images, graphs, pred)
+    loss = F.cross_entropy(pred2, torch.tensor(label))
+    optimizer2.zero_grad()
+    loss.backward()
+    optimizer2.step()
+
+    num_correct = 0
+    num_tests = 0
+
+    for epoch in range(30):
+        images, graphs = get_batch(2)
+
+        pred = model(images, graphs)
+        pred2, label = model2(images, graphs, pred)
+        if pred2.argmax() == label:
+            num_correct += 1
+        num_tests += 1
+        acc_list.append(num_correct / num_tests)
+
+num_correct = 0
+num_tests = 0
+
+for epoch in range(100):
+    images, graphs = get_batch(2)
+
+    pred = model(images, graphs)
+    pred2, label = model2(images, graphs, pred)
+    if pred2.argmax() == label:
+        num_correct += 1
+    num_tests += 1
+
+plt.plot(range(len(acc_list)), acc_list)
+plt.show()
+print('Test accuracy:', num_correct / num_tests)
