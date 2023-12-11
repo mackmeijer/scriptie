@@ -27,9 +27,9 @@ class InformedSender(nn.Module):
     def __init__(
         self, game_size, feat_size, embedding_size, hidden_size, vocab_size=10, temp=1.0, head_size = 2):
         super(InformedSender, self).__init__()
-        self.game_size = 2
-        self.embedding_size = 30
-        self.hidden_size = 80
+        self.game_size = game_size
+        self.embedding_size = embedding_size
+        self.hidden_size = hidden_size
         self.vocab_size = vocab_size
         self.temp = temp
 
@@ -42,30 +42,31 @@ class InformedSender(nn.Module):
         self.gr_conv2 = GATConv(hidden_size, embedding_size, num_heads = head_size)
         self.gr_lin1 = nn.Linear(embedding_size*2, embedding_size)
 
-    def forward(self, x, graphs,   _aux_input=None):
+    def forward(self, x, graphs, _aux_input=None):
         #embedding images 
         emb = []
         for i in range(self.game_size):
             emb.append(self.return_embeddings(x[i]))
+        emb = torch.concat(emb, dim=2)       # batch_size, 1, game_size, embedding_size
 
-        emb = torch.concat(emb, dim=2)
-        h = self.im_conv1(emb)
-        h = torch.sigmoid(h)
-        # in: h of size (batch_size, hidden_size, 1, embedding_size)
-        # out: h of size (batch_size, 1, hidden_size, embedding_size)
-        h = h.transpose(1, 2)
-        h = self.im_conv2(h)
-        # h of size (batch_size, 1, 1, embedding_size)
-        h = torch.sigmoid(h)
-        h = h.squeeze(dim=1)
-        h = h.squeeze(dim=1)
-        # h of size (batch_size, embedding_size)
 
+        h = self.im_conv1(emb)               # batch_size, hidden_size, 1, embedding_size
+        h = torch.nn.LeakyReLU()(h)
+
+        h = h.transpose(1, 2)                # batch_size, 1, hidden_size, embedding_size
+        h = self.im_conv2(h)                 # 1, 1, 1, embedding_size
+        h = torch.nn.LeakyReLU()(h)
+
+        h = h.squeeze(dim=1)
+        h = h.squeeze(dim=1)                 # h of size (batch_size, embedding_size)
+
+        
         #embedding graphs
         gr_emb = []
         for i in range(self.game_size):
             g = graphs[i]
-            feat = graphs[i].ndata['object']
+            feat = g.ndata['object']
+
             res = self.gr_conv1(g, feat)
             res= res.relu()
             res = self.gr_conv2(g, res)
@@ -74,12 +75,14 @@ class InformedSender(nn.Module):
             a = dgl.mean_nodes(g, 'h')
             gr_emb.append(a[0][0][0])
 
-        gr_emb = torch.concat(gr_emb, dim=0)
-        gr_emb = self.gr_lin1(gr_emb)
-        h = torch.cat((gr_emb, h[0]))
-        h = self.im_lin2(h)
+        gr_emb = torch.concat(gr_emb, dim=0)  #emb_size * 2
+
+        gr_emb = self.gr_lin1(gr_emb)         #emb_size
+
+        h = torch.cat((gr_emb, h[0]))         #emb_size * 2
+
+        h = self.im_lin2(h)                   #vocab_size
         h = h.mul(1.0 / self.temp)
-        # h of size (batch_size, vocab_size)
         logits = F.log_softmax(h, dim=0)
         return logits
 
@@ -114,9 +117,10 @@ class Receiver(nn.Module):
         self.temp = temp
         
         self.im_lin1 = nn.Linear(feat_size, embedding_size, bias=False)
-        self.im_conv2 = nn.Conv2d( 1, hidden_size,  kernel_size=(game_size, 1), stride=(game_size, 1), bias=False,)
-        self.im_conv3 = nn.Conv2d(1, 1, kernel_size=(hidden_size, 1), stride=(hidden_size, 1), bias=False)
-        self.im_lin4 = nn.Linear(embedding_size * 2 + vocab_size, 2, bias=False)
+        self.im_conv1 = nn.Conv2d( 1, hidden_size,  kernel_size=(game_size, 1), stride=(game_size, 1), bias=False,)
+        self.im_conv2 = nn.Conv2d(1, 1, kernel_size=(hidden_size, 1), stride=(hidden_size, 1), bias=False)
+        self.im_lin2 = nn.Linear(embedding_size * 2 + vocab_size, hidden_size, bias=False)
+        self.im_lin3 = nn.Linear(hidden_size, 2, bias=False)
         self.gr_conv1 = GATConv(3, hidden_size, num_heads = head_size)
         self.gr_conv2 = GATConv(hidden_size, embedding_size, num_heads = head_size)
         self.gr_lin1 = nn.Linear(embedding_size*2, embedding_size)
@@ -126,27 +130,26 @@ class Receiver(nn.Module):
         #make sure graphs and images are given in random order
         game_size_list = range(self.game_size)
         order = sorted(game_size_list, key=lambda x: random.random())
+
         for i in order:
             emb.append(self.return_embeddings(x[i]))
 
-        emb = torch.concat(emb, dim=2)
+        emb = torch.concat(emb, dim=2)       # batch_size, 1, game_size, embedding_size
 
-        h = self.im_conv2(emb)
-        h = torch.sigmoid(h)
-        # in: h of size (batch_size, hidden_size, 1, embedding_size)
-        # out: h of size (batch_size, 1, hidden_size, embedding_size)
-        h = h.transpose(1, 2)
-        h = self.im_conv3(h)
-        # h of size (batch_size, 1, 1, embedding_size)
-        h = torch.sigmoid(h)
+        h = self.im_conv1(emb)               # batch_size, hidden_size, 1, embedding_size
+        h = torch.nn.LeakyReLU()(h)
+
+        h = h.transpose(1, 2)                # batch_size, 1, hidden_size, embedding_size
+        h = self.im_conv2(h)                 # 1, 1, 1, embedding_size
+        h = torch.nn.LeakyReLU()(h)
+
         h = h.squeeze(dim=1)
-        h = h.squeeze(dim=1)
-        # h of size (batch_size, embedding_size)
+        h = h.squeeze(dim=1)                 # h of size (batch_size, embedding_size)
 
         gr_emb = []
         for i in order:
             g = graphs[i]
-            feat = graphs[i].ndata['object']
+            feat = g.ndata['object']
             res = self.gr_conv1(g, feat)
             res= res.relu()
             res = self.gr_conv2(g, res)
@@ -157,10 +160,13 @@ class Receiver(nn.Module):
 
         gr_emb = torch.cat(gr_emb, dim=0)
         gr_emb = self.gr_lin1(gr_emb)
+
         h = torch.cat((gr_emb, h[0]))
         h = torch.cat((h, vocab))
-        h = self.im_lin4(h)
-        
+        print(h)
+        raise(KeyboardInterrupt)
+        h = self.im_lin2(h)
+        h = self.im_lin3(h)
         h = h.mul(1.0 / self.temp)
         # h of size (batch_size, vocab_size)
         logits = F.log_softmax(h, dim=0)
@@ -260,37 +266,45 @@ def get_batch(batch_size):
 
 
 
-model = InformedSender(game_size = 2, feat_size = 160000, embedding_size = 30, hidden_size=80, head_size = 2)
-model2 = Receiver(game_size = 2, feat_size = 160000, embedding_size = 30, hidden_size=80, head_size = 2)
+model = InformedSender(game_size = 2, feat_size = 160000, embedding_size = 30, hidden_size=20, head_size = 2)
+model2 = Receiver(game_size = 2, feat_size = 160000, embedding_size = 30, hidden_size=20, head_size = 2)
 
 optimizer = torch.optim.Adam(model.parameters(), lr=0.01)
 optimizer2 = torch.optim.Adam(model2.parameters(), lr=0.01)
 
 acc_list = []
 
-for epoch in range(100):
+for epoch in range(1000):
     print(epoch)
     images, graphs = get_batch(2)
-
     pred = model(images, graphs)
+    print(pred)
     pred2, label = model2(images, graphs, pred)
-    loss = F.cross_entropy(pred2, torch.tensor(label))
+    # print("prediction:", pred2, "true label:", label)
+    reward = torch.tensor([1.0 if pred2.argmax() == label else 0.0], requires_grad=True)
+    # print("reward:", reward)
+    
+    optimizer.zero_grad()
+    reward.backward()
+    optimizer.step()
+    reward.backward()
     optimizer2.zero_grad()
-    loss.backward()
+
     optimizer2.step()
 
     num_correct = 0
     num_tests = 0
 
-    for epoch in range(30):
-        images, graphs = get_batch(2)
 
-        pred = model(images, graphs)
-        pred2, label = model2(images, graphs, pred)
-        if pred2.argmax() == label:
-            num_correct += 1
-        num_tests += 1
-        acc_list.append(num_correct / num_tests)
+for epoch in range(30):
+    images, graphs = get_batch(2)
+
+    pred = model(images, graphs)
+    pred2, label = model2(images, graphs, pred)
+    if pred2.argmax() == label:
+        num_correct += 1
+    num_tests += 1
+    acc_list.append(num_correct / num_tests)
 
 num_correct = 0
 num_tests = 0
